@@ -1,18 +1,9 @@
 # Re:Roll Together
 Re:Roll Together is a modernized and maintained fork of the original Roll Together browser extension. Built to bring back the joy of watching anime together, this extension seamlessly synchronizes Crunchyroll video playback across multiple computers, ensuring you and your friends are always on the same frame.
 
-## Retirement note
-I believe this extension's purpose was completed as we went through the pandemic and were able to still feel close our friends, at least while we watched anime. Since then, several other forks and new extensions with similar purposes were created. Finally, the maintainance cost, as an totally free open source project, increased with manifest v3, changes in the crunchyroll player and pushbacks from Google to publish fixes.
-
-I want to leave a huge thanks to everyone who contributed to this project.
-
 ## Browser Support
 - **Chrome/Chromium**: Manifest V3 (Chrome 116+)
 - **Firefox**: Manifest V2 (Firefox 109+)
-
-## Download
-- **Chrome**: [Chrome Web Store](https://chrome.google.com/webstore/detail/ilpfeljgdikoabaclkjgkbeegeoijfca)
-- **Firefox**: Available as a signed add-on (coming soon)
 
 ## Development Setup
 
