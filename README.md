@@ -68,4 +68,4 @@ npm run watch:firefox
 - [ ] Create a Website
 
 ## Related Repos
-Backend repo: https://github.com/samuraiexx/roll_together_backend
+Backend repo: https://github.com/xoanxc/Re-RollTogether_backend
