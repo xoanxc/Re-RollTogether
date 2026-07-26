@@ -154,37 +154,44 @@ function handleServiceWorkerMessage(serviceWorkerMessage: Message) {
     case MessageTypes.SW2CS_REMOTE_UPDATE:
       handleRemoteUpdate(serviceWorkerMessage);
       break;
-    case MessageTypes.SW2CS_ROOM_DISCONNECT:
-      if (g_heartBeatInterval) {
-        clearInterval(g_heartBeatInterval);
-      }
-      break;
-    default:
-      throw "Invalid BackgroundMessageType: " + serviceWorkerMessage.type;
   }
 }
 
-function runContentScript() {
-  g_player = (document.getElementById("player0") || document.getElementById("bitmovinplayer-video-null")) as HTMLVideoElement;
+// 1. Escuchar los mensajes del Service Worker
+g_port.onMessage.addListener(handleServiceWorkerMessage);
 
-  if (!g_player) {
-    setTimeout(runContentScript, 500);
+// 2. Selector exacto de Bitmovin
+const getCrunchyrollVideo = (): HTMLVideoElement | undefined => {
+  const video = document.querySelector<HTMLVideoElement>('video#bitmovinplayer-video-null, .bitmovinplayer-container video, video');
+  return video !== null ? video : undefined;
+};
+
+// 3. Bucle de inicialización del reproductor
+const initializePlayer = () => {
+  const video = getCrunchyrollVideo();
+
+  if (_.isNil(video)) {
+    setTimeout(initializePlayer, 1000); // Reintenta hasta que el vídeo aparezca en el DOM
     return;
   }
 
-  for (const action of getEnumKeys(Actions)) {
-    g_player.addEventListener(
-      Actions[action],
-      handleLocalAction(Actions[action])
-    );
-  }
+  log("[Re-RollTogether] Reproductor detectado con éxito:", video);
+  g_player = video;
 
-  // Replay any messages that arrived before the player was ready
-  const pending = g_pendingMessages.splice(0);
-  for (const msg of pending) {
-    handleServiceWorkerMessage(msg);
-  }
-}
+  // Asigna automáticamente los eventos (play, pause, timeupdate) al vídeo
+  getEnumKeys(Actions).forEach((key) => {
+    const action = Actions[key];
+    g_player!.addEventListener(action, handleLocalAction(action));
+  });
 
-g_port.onMessage.addListener(handleServiceWorkerMessage);
-runContentScript();
+  // Procesa cualquier mensaje que haya llegado mientras el vídeo cargaba
+  while (g_pendingMessages.length > 0) {
+    const msg = g_pendingMessages.shift();
+    if (msg) handleServiceWorkerMessage(msg);
+  }
+};
+
+// Arrancar cuando la página cargue
+window.addEventListener("load", () => {
+  setTimeout(initializePlayer, 2000);
+});
