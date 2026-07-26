@@ -45,29 +45,33 @@ function getStates(): {
   return { state, currentProgress, timeJump };
 }
 
+// 1. Declaramos la función con debounce utilizando lodash
+// Esto agrupa las llamadas repetitivas en un periodo de 400ms.
+const debouncedSync = _.debounce((state: States, currentProgress: number) => {
+  const type = MessageTypes.CS2SW_LOCAL_UPDATE;
+  g_port.postMessage({ type, state, currentProgress });
+}, 400);
+
 const handleLocalAction = (action: Actions) => (): void => {
   if (ignoreNext[action] === true) {
     ignoreNext[action] = false;
     return;
   }
 
-  const {
-    state,
-    currentProgress,
-    timeJump,
-  }: { state: States; currentProgress: number; timeJump: boolean } =
-    getStates();
-  const type = MessageTypes.CS2SW_LOCAL_UPDATE;
+  const { state, currentProgress, timeJump }: { state: States; currentProgress: number; timeJump: boolean } = getStates();
 
-  log("Local Action", action, { type, state, currentProgress, timeJump });
   switch (action) {
     case Actions.PLAY:
     case Actions.PAUSE:
-      g_port.postMessage({ type, state, currentProgress });
+      // Si hay un play o pause explícito, forzamos el envío cancelando esperas previas
+      debouncedSync.flush(); 
+      g_port.postMessage({ type: MessageTypes.CS2SW_LOCAL_UPDATE, state, currentProgress });
       break;
     case Actions.TIME_UPDATE:
       if (timeJump) {
-        g_port.postMessage({ type, state, currentProgress });
+        // En lugar de enviar un postMessage inmediato cada milisegundo al arrastrar,
+        // usamos el debounce. Solo se enviará cuando el usuario deje de arrastrar.
+        debouncedSync(state, currentProgress);
       }
       break;
   }
@@ -78,31 +82,47 @@ function triggerAction(action: Actions, progress: number): void {
     log("Player is Undefined so no action will be triggered");
     return;
   }
+
   ignoreNext[action] = true;
 
   switch (action) {
     case Actions.PAUSE:
-      if (g_playPromise) {
-        g_playPromise.then(() => {
-          g_player!.pause();
-          g_player!.currentTime = progress;
-        }).catch(_.noop);
-        g_playPromise = undefined;
-      } else {
-        g_player.pause();
-        g_player.currentTime = progress;
-      }
+      g_player.pause();
+      g_player.currentTime = progress;
       break;
+
     case Actions.PLAY:
-      g_playPromise = g_player.play();
-      g_playPromise.catch(_.noop);
       if (Math.abs(g_player.currentTime - progress) > LIMIT_DELTA_TIME) {
         g_player.currentTime = progress;
       }
+
+      // Definimos la función que ejecuta y captura la Promesa de forma segura
+      const attemptPlay = () => {
+        g_playPromise = g_player!.play();
+        if (g_playPromise !== undefined) {
+          g_playPromise.catch(error => {
+            log("Promesa de play() rechazada (típico en buffers lentos de Bitmovin o condiciones de carrera)", error);
+          });
+        }
+      };
+
+      // Comprobamos si el DOM ya tiene suficiente buffer cargado (HAVE_FUTURE_DATA)
+      if (g_player.readyState >= 3) {
+        attemptPlay();
+      } else {
+        // Si el buffer no está listo, encolamos el play() para el evento 'canplay'
+        const onCanPlay = () => {
+          g_player!.removeEventListener('canplay', onCanPlay);
+          attemptPlay();
+        };
+        g_player.addEventListener('canplay', onCanPlay);
+      }
       break;
+
     case Actions.TIME_UPDATE:
       g_player.currentTime = progress;
       break;
+
     default:
       ignoreNext[action] = false;
   }
@@ -124,13 +144,17 @@ function handleRemoteUpdate(message: Message): void {
 
   const { state, currentProgress }: { state: States; currentProgress: number } =
     getStates();
-  if (state !== roomState) {
-    if (roomState === States.PAUSED) triggerAction(Actions.PAUSE, roomProgress);
-    if (roomState === States.PLAYING) triggerAction(Actions.PLAY, roomProgress);
-  }
 
+  // 1. Si hay una diferencia de tiempo notable, forzamos primero la posición
   if (Math.abs(roomProgress - currentProgress) > LIMIT_DELTA_TIME) {
     triggerAction(Actions.TIME_UPDATE, roomProgress);
+  }
+
+  // 2. Aplicamos el estado objetivo
+  if (roomState === States.PAUSED) {
+    triggerAction(Actions.PAUSE, roomProgress);
+  } else if (roomState === States.PLAYING) {
+    triggerAction(Actions.PLAY, roomProgress);
   }
 }
 
