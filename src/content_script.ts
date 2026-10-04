@@ -216,6 +216,10 @@ const initializePlayer = () => {
 };
 
 // Arrancar cuando la página cargue
-window.addEventListener("load", () => {
+if (document.readyState === "complete") {
   setTimeout(initializePlayer, 2000);
-});
+} else {
+  window.addEventListener("load", () => {
+    setTimeout(initializePlayer, 2000);
+  });
+}
