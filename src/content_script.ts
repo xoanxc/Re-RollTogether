@@ -14,12 +14,22 @@ import { extensionAPI } from "./browser-compat";
 
 const g_port = extensionAPI.runtime.connect({ name: PortName.CONTENT_SCRIPT });
 
-const ignoreNext: { [index: string]: boolean } = {};
+let g_actionLockExpires = 0;
+
+function setLock(ms: number) {
+  g_actionLockExpires = Date.now() + ms;
+}
+
+function isLocked(): boolean {
+  return Date.now() < g_actionLockExpires;
+}
+
 let g_player: HTMLVideoElement | undefined = undefined;
 let g_lastFrameProgress: number | undefined = undefined;
 let g_heartBeatInterval: NodeJS.Timeout | undefined = undefined; // Keeps Service Worker alive while connected
 let g_pendingMessages: Message[] = [];
 let g_playPromise: Promise<void> | undefined = undefined;
+let g_remoteUpdateAbortController: AbortController | undefined = undefined;
 
 function getState(stateName: PlayerStateProp): boolean | number {
   return g_player![stateName];
@@ -53,8 +63,7 @@ const debouncedSync = _.debounce((state: States, currentProgress: number) => {
 }, 400);
 
 const handleLocalAction = (action: Actions) => (): void => {
-  if (ignoreNext[action] === true) {
-    ignoreNext[action] = false;
+  if (isLocked()) {
     return;
   }
 
@@ -77,57 +86,6 @@ const handleLocalAction = (action: Actions) => (): void => {
   }
 };
 
-function triggerAction(action: Actions, progress: number): void {
-  if (_.isNil(g_player)) {
-    log("Player is Undefined so no action will be triggered");
-    return;
-  }
-
-  ignoreNext[action] = true;
-
-  switch (action) {
-    case Actions.PAUSE:
-      g_player.pause();
-      g_player.currentTime = progress;
-      break;
-
-    case Actions.PLAY:
-      if (Math.abs(g_player.currentTime - progress) > LIMIT_DELTA_TIME) {
-        g_player.currentTime = progress;
-      }
-
-      // Definimos la función que ejecuta y captura la Promesa de forma segura
-      const attemptPlay = () => {
-        g_playPromise = g_player!.play();
-        if (g_playPromise !== undefined) {
-          g_playPromise.catch(error => {
-            log("Promesa de play() rechazada (típico en buffers lentos de Bitmovin o condiciones de carrera)", error);
-          });
-        }
-      };
-
-      // Comprobamos si el DOM ya tiene suficiente buffer cargado (HAVE_FUTURE_DATA)
-      if (g_player.readyState >= 3) {
-        attemptPlay();
-      } else {
-        // Si el buffer no está listo, encolamos el play() para el evento 'canplay'
-        const onCanPlay = () => {
-          g_player!.removeEventListener('canplay', onCanPlay);
-          attemptPlay();
-        };
-        g_player.addEventListener('canplay', onCanPlay);
-      }
-      break;
-
-    case Actions.TIME_UPDATE:
-      g_player.currentTime = progress;
-      break;
-
-    default:
-      ignoreNext[action] = false;
-  }
-}
-
 function sendRoomConnectionMessage(): void {
   const { state, currentProgress }: { state: States; currentProgress: number } =
     getStates();
@@ -135,26 +93,111 @@ function sendRoomConnectionMessage(): void {
   g_port.postMessage({ state, currentProgress, type });
 }
 
-function handleRemoteUpdate(message: Message): void {
+async function handleRemoteUpdate(message: Message): Promise<void> {
   if (message.type != MessageTypes.SW2CS_REMOTE_UPDATE) {
     throw "Invalid Message Type: " + message.type;
   }
   const { roomState, roomProgress } = message;
   log("Handling Remote Update", { roomState, roomProgress });
 
-  const { state, currentProgress }: { state: States; currentProgress: number } =
-    getStates();
-
-  // 1. Si hay una diferencia de tiempo notable, forzamos primero la posición
-  if (Math.abs(roomProgress - currentProgress) > LIMIT_DELTA_TIME) {
-    triggerAction(Actions.TIME_UPDATE, roomProgress);
+  if (_.isNil(g_player)) {
+    log("Player is Undefined so no remote action will be triggered");
+    return;
   }
 
-  // 2. Aplicamos el estado objetivo
+  // Cancel any pending remote updates
+  if (g_remoteUpdateAbortController) {
+    g_remoteUpdateAbortController.abort();
+  }
+  g_remoteUpdateAbortController = new AbortController();
+  const signal = g_remoteUpdateAbortController.signal;
+
+  const { state, currentProgress }: { state: States; currentProgress: number } = getStates();
+
+  // 1. Decouple Time Updates from Play/Pause Executions
+  if (Math.abs(roomProgress - currentProgress) > LIMIT_DELTA_TIME) {
+    setLock(5000); // Lock local action emission during seek
+    g_player.currentTime = roomProgress;
+
+    // Await seeked event with fallback
+    await new Promise<void>((resolve) => {
+      let timeoutId: NodeJS.Timeout;
+
+      const onSeeked = () => {
+        clearTimeout(timeoutId);
+        resolve();
+      };
+
+      const onAbort = () => {
+        g_player!.removeEventListener("seeked", onSeeked);
+        clearTimeout(timeoutId);
+        resolve();
+      };
+
+      timeoutId = setTimeout(() => {
+        log("Seeked event fallback timeout triggered");
+        g_player!.removeEventListener("seeked", onSeeked);
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, 3000);
+
+      g_player!.addEventListener("seeked", onSeeked, { once: true });
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+  }
+
+  if (signal.aborted) {
+    log("Remote update execution aborted");
+    return;
+  }
+
+  // 2. Handle state application and handle/catch pending play() Promises
+  setLock(1000);
   if (roomState === States.PAUSED) {
-    triggerAction(Actions.PAUSE, roomProgress);
+    g_player.pause();
   } else if (roomState === States.PLAYING) {
-    triggerAction(Actions.PLAY, roomProgress);
+    const attemptPlaySafe = () => {
+      setLock(1000); // Re-lock just before play
+      g_playPromise = g_player!.play();
+      if (g_playPromise !== undefined) {
+        g_playPromise.catch(error => {
+          log("Promesa de play() rechazada, posible interrupción", error);
+        });
+      }
+    };
+
+    if (g_player.readyState >= 3) {
+      attemptPlaySafe();
+    } else {
+      await new Promise<void>((resolve) => {
+        let timeoutId: NodeJS.Timeout;
+
+        const onCanPlay = () => {
+          clearTimeout(timeoutId);
+          resolve();
+        };
+
+        const onAbort = () => {
+          g_player!.removeEventListener("canplay", onCanPlay);
+          clearTimeout(timeoutId);
+          resolve();
+        };
+
+        timeoutId = setTimeout(() => {
+          log("canplay event fallback timeout triggered (buffer lag)");
+          g_player!.removeEventListener("canplay", onCanPlay);
+          signal.removeEventListener("abort", onAbort);
+          resolve();
+        }, 5000);
+
+        g_player!.addEventListener("canplay", onCanPlay, { once: true });
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+
+      if (!signal.aborted) {
+        attemptPlaySafe();
+      }
+    }
   }
 }
 
