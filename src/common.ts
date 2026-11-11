@@ -1,4 +1,3 @@
-import _, { get } from "lodash";
 import { Radius, StorageData } from "./types";
 import { extensionAPI } from "./browser-compat";
 
@@ -32,7 +31,7 @@ export function getParameterByName(
   const regex: RegExp = new RegExp("(?:[?&]|^)" + name + "=([^&#]*)");
   const results: RegExpExecArray | null = regex.exec(queryString);
 
-  if (_.isNull(results) || results.length < 2) {
+  if (results === null || results.length < 2) {
     return null;
   }
 

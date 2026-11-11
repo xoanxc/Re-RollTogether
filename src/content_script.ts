@@ -1,5 +1,3 @@
-import _ from "lodash";
-
 import { LIMIT_DELTA_TIME, log, getEnumKeys } from "./common";
 
 import {
@@ -12,7 +10,11 @@ import {
 } from "./types";
 import { extensionAPI } from "./browser-compat";
 
-const g_port = extensionAPI.runtime.connect({ name: PortName.CONTENT_SCRIPT });
+// The port is opened lazily, only from the frame that actually contains the
+// video player. The script runs in every Crunchyroll frame (all_frames), and
+// the service worker keeps a single port per tab, so frames without a player
+// must not connect or they could steal the tab's port.
+let g_port: chrome.runtime.Port;
 
 let g_actionLockExpires = 0;
 
@@ -55,12 +57,24 @@ function getStates(): {
   return { state, currentProgress, timeJump };
 }
 
-// 1. Declaramos la función con debounce utilizando lodash
-// Esto agrupa las llamadas repetitivas en un periodo de 400ms.
-const debouncedSync = _.debounce((state: States, currentProgress: number) => {
-  const type = MessageTypes.CS2SW_LOCAL_UPDATE;
-  g_port.postMessage({ type, state, currentProgress });
-}, 400);
+// 1. Debounce de los saltos de tiempo: agrupa las llamadas repetitivas
+// (p. ej. al arrastrar la barra) en un periodo de 400ms.
+let g_syncTimeout: ReturnType<typeof setTimeout> | undefined = undefined;
+
+function debouncedSync(state: States, currentProgress: number): void {
+  cancelDebouncedSync();
+  g_syncTimeout = setTimeout(() => {
+    g_syncTimeout = undefined;
+    g_port.postMessage({ type: MessageTypes.CS2SW_LOCAL_UPDATE, state, currentProgress });
+  }, 400);
+}
+
+function cancelDebouncedSync(): void {
+  if (g_syncTimeout !== undefined) {
+    clearTimeout(g_syncTimeout);
+    g_syncTimeout = undefined;
+  }
+}
 
 const handleLocalAction = (action: Actions) => (): void => {
   if (isLocked()) {
@@ -72,8 +86,9 @@ const handleLocalAction = (action: Actions) => (): void => {
   switch (action) {
     case Actions.PLAY:
     case Actions.PAUSE:
-      // Si hay un play o pause explícito, forzamos el envío cancelando esperas previas
-      debouncedSync.flush(); 
+      // Play/pause ya lleva la posición actual: descartamos el salto pendiente
+      // en vez de enviarlo primero (un mensaje menos y sin estado obsoleto)
+      cancelDebouncedSync();
       g_port.postMessage({ type: MessageTypes.CS2SW_LOCAL_UPDATE, state, currentProgress });
       break;
     case Actions.TIME_UPDATE:
@@ -100,7 +115,7 @@ async function handleRemoteUpdate(message: Message): Promise<void> {
   const { roomState, roomProgress } = message;
   log("Handling Remote Update", { roomState, roomProgress });
 
-  if (_.isNil(g_player)) {
+  if (g_player == null) {
     log("Player is Undefined so no remote action will be triggered");
     return;
   }
@@ -212,6 +227,7 @@ function handleServiceWorkerMessage(serviceWorkerMessage: Message) {
 
   switch (serviceWorkerMessage.type) {
     case MessageTypes.SW2CS_ROOM_CONNECTION:
+      if (g_heartBeatInterval) clearInterval(g_heartBeatInterval);
       g_heartBeatInterval = setInterval(
         () => g_port.postMessage({ type: MessageTypes.CS2SW_HEART_BEAT }),
         20000
@@ -224,9 +240,6 @@ function handleServiceWorkerMessage(serviceWorkerMessage: Message) {
   }
 }
 
-// 1. Escuchar los mensajes del Service Worker
-g_port.onMessage.addListener(handleServiceWorkerMessage);
-
 // 2. Selector exacto de Bitmovin
 const getCrunchyrollVideo = (): HTMLVideoElement | undefined => {
   const video = document.querySelector<HTMLVideoElement>('video#bitmovinplayer-video-null, .bitmovinplayer-container video, video');
@@ -237,7 +250,7 @@ const getCrunchyrollVideo = (): HTMLVideoElement | undefined => {
 const initializePlayer = () => {
   const video = getCrunchyrollVideo();
 
-  if (_.isNil(video)) {
+  if (video == null) {
     setTimeout(initializePlayer, 1000); // Reintenta hasta que el vídeo aparezca en el DOM
     return;
   }
@@ -250,6 +263,10 @@ const initializePlayer = () => {
     const action = Actions[key];
     g_player!.addEventListener(action, handleLocalAction(action));
   });
+
+  // Conecta con el Service Worker solo ahora que este frame tiene reproductor
+  g_port = extensionAPI.runtime.connect({ name: PortName.CONTENT_SCRIPT });
+  g_port.onMessage.addListener(handleServiceWorkerMessage);
 
   // Procesa cualquier mensaje que haya llegado mientras el vídeo cargaba
   while (g_pendingMessages.length > 0) {

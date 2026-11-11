@@ -1,4 +1,3 @@
-import _ from "lodash";
 import { getExtensionColor, log, updateQueryStringParameter } from "./common";
 import { Message, MessageTypes, PortName } from "./types";
 import { extensionAPI } from "./browser-compat";
@@ -97,7 +96,6 @@ extensionAPI.tabs.onUpdated.addListener((tabId: number, changeInfo: chrome.tabs.
   requestRoomId();
 });
 
-urlInput.onclick = _.noop;
 
 getExtensionColor().then((color: string): void => {
   for (let button of Array.from(optionButtons)) {

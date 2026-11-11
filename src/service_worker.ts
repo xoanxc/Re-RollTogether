@@ -1,5 +1,4 @@
-import io from "socket.io-client";
-import _ from "lodash";
+import { io } from "socket.io-client";
 
 import { log, getParameterByName, setIconColor } from "./common";
 import { Message, MessageTypes, PortName, States, TabInfo } from "./types";
@@ -31,14 +30,14 @@ function handleContentScriptConnection(port: chrome.runtime.Port): void {
     return;
   }
 
-  if (_.isNil(tabsInfo[tabId])) {
+  if (tabsInfo[tabId] == null) {
     tabsInfo[tabId] = { port, tabId, sentConnectionRequest: false };
   } else {
     tabsInfo[tabId]!.port = port;
   }
 
   const urlRoomId: string | null = getParameterByName(url, "rollTogetherRoom");
-  if (!_.isNil(urlRoomId)) {
+  if (urlRoomId != null) {
     sendConnectionRequestToContentScript(tabId);
   } else {
     getActionAPI().enable(tabId);
@@ -62,7 +61,7 @@ function handleContentScriptDisconnection(port: chrome.runtime.Port): void {
     getActionAPI().disable(tabId);
     disconnectWebsocket(tabId);
     delete tabsInfo[tabId];
-  }, 3000);
+  }, 10000); // Content script waits ~2s + player detection before reconnecting
 }
 
 function tryUpdatePopup(roomId: string | undefined = undefined): void {
@@ -158,13 +157,13 @@ function sendUpdateToContentScript(
 function sendConnectionRequestToContentScript(tabId: number): void {
   const tabInfo = tabsInfo[tabId];
   log({ tabsInfo, tabInfo, tabId });
-  const port = tabInfo!.port!;
-  const tab = port.sender!.tab!;
 
   if (tabInfo == undefined) {
-    log(`No tab info found for tab ${tabId}`);
+    log(`No tab info found for tab ${tabId} (player not detected yet?)`);
     return;
   }
+  const port = tabInfo.port;
+  const tab = port.sender!.tab!;
 
   if (tabInfo.sentConnectionRequest) {
     log("Connection request already sent to contentScript", { tab });
@@ -212,9 +211,13 @@ function connectWebsocket(
     return;
   }
 
-  let query: string = `videoProgress=${Math.round(
-    videoProgress
-  )}&videoState=${videoState}${urlRoomId ? `&room=${urlRoomId}` : ""}`;
+  const query: { [key: string]: string } = {
+    videoProgress: String(Math.round(videoProgress)),
+    videoState,
+  };
+  if (urlRoomId) {
+    query.room = urlRoomId;
+  }
 
   tabInfo.socket = io(serverUrl, { query, transports: ["websocket"] });
   tabInfo.socket.on(
@@ -279,6 +282,8 @@ extensionAPI.runtime.onInstalled.addListener(() => {
 });
 
 getActionAPI().disable();
-self.addEventListener = _.noop;
+// socket.io-client registers listeners (e.g. "offline") after startup, which a
+// service worker only allows during its initial evaluation; ignore them.
+self.addEventListener = () => {};
 
 log("Service Worker Loaded");

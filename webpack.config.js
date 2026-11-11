@@ -25,7 +25,6 @@ module.exports = (env) => {
       content_script: "./src/content_script.ts",
       popup: "./src/popup.ts",
       options: "./src/options.ts",
-      "browser-compat": "./src/browser-compat.ts",
     },
     module: {
       rules: [

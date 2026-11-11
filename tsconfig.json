@@ -6,6 +6,7 @@
     "allowJs": true,
     "target": "ES2016",
     "module": "ESNext",
+    "moduleResolution": "node",
     "sourceMap": true,
     "strict": true,
     "alwaysStrict": true,

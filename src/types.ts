@@ -1,3 +1,5 @@
+import type { Socket } from "socket.io-client";
+
 export enum Actions {
   PLAY = "play",
   PAUSE = "pause",
@@ -85,7 +87,7 @@ export interface StorageData {
 export interface TabInfo {
   tabId: number;
   port: chrome.runtime.Port;
-  socket?: SocketIOClient.Socket;
+  socket?: Socket;
   roomId?: string;
   sentConnectionRequest: boolean;
 }
